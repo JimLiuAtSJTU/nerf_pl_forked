@@ -134,3 +134,5 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+/datasets/
+/__temp_weight_ddp_end.ckpt

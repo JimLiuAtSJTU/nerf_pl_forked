@@ -1,3 +1,4 @@
+import datetime
 import os, sys
 from opt import get_opts
 import torch
@@ -120,6 +121,14 @@ class NeRFSystem(LightningModule):
         rays, rgbs = self.decode_batch(batch)
         rays = rays.squeeze() # (H*W, 3)
         rgbs = rgbs.squeeze() # (H*W, 3)
+        #print(rays.device)
+        #for model in self.models:
+        #    device=rays.device
+        #    model=model.to(device)
+
+
+        #print(rays.device)
+        #assert rays.device ==[ model.device for model in self.models]
         results = self(rays)
         log = {'val_loss': self.loss(results, rgbs)}
         typ = 'fine' if 'rgb_fine' in results else 'coarse'
@@ -148,7 +157,33 @@ class NeRFSystem(LightningModule):
                }
 
 
+
+
+
+class Enhanced_NeRF_System(NeRFSystem):
+    def __init__(self, hparams):
+        super(Enhanced_NeRF_System, self).__init__(hparams)
+        pass
+
+
+
+
+
+
+
+
+
+
+
+
+
 if __name__ == '__main__':
+
+    print(datetime.datetime.now())
+    print(f'cuda available:{torch.cuda.is_available()}')
+    #os.environ["CUDA_VISIBLE_DEVICES"]="1"
+
+
     hparams = get_opts()
     system = NeRFSystem(hparams)
     checkpoint_callback = ModelCheckpoint(filepath=os.path.join(f'ckpts/{hparams.exp_name}',
@@ -172,6 +207,7 @@ if __name__ == '__main__':
                       weights_summary=None,
                       progress_bar_refresh_rate=1,
                       gpus=hparams.num_gpus,
+                      #gpus=2,
                       distributed_backend='ddp' if hparams.num_gpus>1 else None,
                       num_sanity_val_steps=1,
                       benchmark=True,

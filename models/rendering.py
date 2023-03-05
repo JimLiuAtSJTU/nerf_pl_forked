@@ -130,6 +130,9 @@ def render_rays(models,
                                              dir_embedded[i:i+chunk]], 1)
             else:
                 xyzdir_embedded = xyz_embedded
+
+            if torch.cuda.is_available():
+                xyzdir_embedded=xyzdir_embedded.cuda()
             out_chunks += [model(xyzdir_embedded, sigma_only=weights_only)]
 
         out = torch.cat(out_chunks, 0)
