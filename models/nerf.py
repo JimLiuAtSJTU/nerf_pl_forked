@@ -1,3 +1,5 @@
+import copy
+import time
 import warnings
 
 import torch
@@ -34,7 +36,10 @@ class Embedding(nn.Module):
         """
         #print('x shape \n')
         #print(x.shape)
-        assert len(x.shape)==2
+        if len(x.shape)!=2:
+            time.sleep(2)
+            raise AssertionError
+
         assert x.shape[1]==3
         # the original implementation might have some problems
         out = torch.zeros((x.shape[0],self.out_channels))
@@ -155,6 +160,8 @@ class NeRF(nn.Module):
         return out
 
 
+
+
 class NeRF_Chromatic(nn.Module):
     def __init__(self,
                  D=8, W=256,
@@ -179,8 +186,9 @@ class NeRF_Chromatic(nn.Module):
         self.in_channels_chromatrans = in_channels_chroma_code
 
         if default_chroma_codes is None:
-            warnings.warn('caution. use default chroma code, i.e. zeros.')
-            self.default_chroma_code=torch.zeros((in_channels_chroma_code))
+            warnings.warn('caution. use default chroma code, i.e. embedded{zeros(3)}')
+            embedding_func=Embedding(3,4)
+            self.default_chroma_code=embedding_func(torch.zeros(1,3))
         else:
             self.default_chroma_code=default_chroma_codes
 
@@ -207,6 +215,15 @@ class NeRF_Chromatic(nn.Module):
 
         # output layers
         self.sigma = nn.Linear(W, 1)
+
+        self.rgb_residial_block=nn.Sequential(
+            nn.Linear(W // 2, W //2 ),
+            nn.ReLU()
+        )
+
+        self.rgb_residial_block2=copy.deepcopy(self.rgb_residial_block)
+
+
         self.rgb = nn.Sequential(
                         nn.Linear(W//2, 3),
                         nn.Sigmoid())
@@ -252,7 +269,8 @@ class NeRF_Chromatic(nn.Module):
                 torch.split(x, [self.in_channels_xyz,
                                 self.in_channels_dir,
                                 self.in_channels_chromatrans,
-                                self.in_channels_chromatrans], dim=-1)
+                                self.in_channels_chromatrans
+                                ], dim=-1)
         else:
             input_xyz = x
 
@@ -329,8 +347,14 @@ class NeRF_Chromatic(nn.Module):
 
         dir_encoding_input = torch.cat([xyz_encoding_final, input_dir, input_chroma_code], -1)
         dir_encoding = self.dir_encoding(dir_encoding_input)
-        rgb = self.rgb(dir_encoding)
+        dir_encoding_2 = self.rgb_residial_block(dir_encoding)
+        #rgb = self.rgb_residial_block2(dir_encoding+dir_encoding_2)
 
+
+        #use residual connection seems to lead to not converge problem
+        rgb = self.rgb_residial_block2(dir_encoding_2)
+
+        rgb = self.rgb(rgb)
         return rgb
 
 

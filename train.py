@@ -1,21 +1,24 @@
+import copy
 import datetime
 import os, sys
+import warnings
+
 from opt import get_opts
 import torch
 from collections import defaultdict
-
+import random
 from torch.utils.data import DataLoader
 from datasets import dataset_dict
 
 # models
-from models.nerf import Embedding, NeRF
+from models.nerf import Embedding, NeRF, NeRF_Chromatic
 from models.rendering import render_rays
 
 # optimizer, scheduler, visualization
 from utils import *
 
 # losses
-from losses import loss_dict
+from losses import loss_dict, MSELoss
 
 # metrics
 from metrics import *
@@ -25,15 +28,18 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.logging import TestTubeLogger
 
+DEBUG = False
+
+
 class NeRFSystem(LightningModule):
     def __init__(self, hparams):
         super(NeRFSystem, self).__init__()
         self.hparams = hparams
 
-        self.loss = loss_dict[hparams.loss_type]()
+        self.loss = loss_dict['mse']()
 
-        self.embedding_xyz = Embedding(3, 10) # 10 is the default number
-        self.embedding_dir = Embedding(3, 4) # 4 is the default number
+        self.embedding_xyz = Embedding(3, 10)  # 10 is the default number
+        self.embedding_dir = Embedding(3, 4)  # 4 is the default number
         self.embeddings = [self.embedding_xyz, self.embedding_dir]
 
         self.nerf_coarse = NeRF()
@@ -43,8 +49,8 @@ class NeRFSystem(LightningModule):
             self.models += [self.nerf_fine]
 
     def decode_batch(self, batch):
-        rays = batch['rays'] # (B, 8)
-        rgbs = batch['rgbs'] # (B, 3)
+        rays = batch['rays']  # (B, 8)
+        rgbs = batch['rgbs']  # (B, 3)
         return rays, rgbs
 
     def forward(self, rays):
@@ -55,13 +61,13 @@ class NeRFSystem(LightningModule):
             rendered_ray_chunks = \
                 render_rays(self.models,
                             self.embeddings,
-                            rays[i:i+self.hparams.chunk],
+                            rays[i:i + self.hparams.chunk],
                             self.hparams.N_samples,
                             self.hparams.use_disp,
                             self.hparams.perturb,
                             self.hparams.noise_std,
                             self.hparams.N_importance,
-                            self.hparams.chunk, # chunk size is effective in val mode
+                            self.hparams.chunk,  # chunk size is effective in val mode
                             self.train_dataset.white_back)
 
             for k, v in rendered_ray_chunks.items():
@@ -84,13 +90,13 @@ class NeRFSystem(LightningModule):
     def configure_optimizers(self):
         self.optimizer = get_optimizer(self.hparams, self.models)
         scheduler = get_scheduler(self.hparams, self.optimizer)
-        
+
         return [self.optimizer], [scheduler]
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset,
                           shuffle=True,
-                          num_workers=4,
+                          num_workers=1 if DEBUG else 4,
                           batch_size=self.hparams.batch_size,
                           pin_memory=True)
 
@@ -98,9 +104,9 @@ class NeRFSystem(LightningModule):
         return DataLoader(self.val_dataset,
                           shuffle=False,
                           num_workers=4,
-                          batch_size=1, # validate one image (H*W rays) at a time
+                          batch_size=1,  # validate one image (H*W rays) at a time
                           pin_memory=True)
-    
+
     def training_step(self, batch, batch_nb):
         log = {'lr': get_learning_rate(self.optimizer)}
         rays, rgbs = self.decode_batch(batch)
@@ -115,33 +121,33 @@ class NeRFSystem(LightningModule):
         return {'loss': loss,
                 'progress_bar': {'train_psnr': psnr_},
                 'log': log
-               }
+                }
 
     def validation_step(self, batch, batch_nb):
         rays, rgbs = self.decode_batch(batch)
-        rays = rays.squeeze() # (H*W, 3)
-        rgbs = rgbs.squeeze() # (H*W, 3)
-        #print(rays.device)
-        #for model in self.models:
+        rays = rays.squeeze()  # (H*W, 3)
+        rgbs = rgbs.squeeze()  # (H*W, 3)
+        # print(rays.device)
+        # for model in self.models:
         #    device=rays.device
         #    model=model.to(device)
 
-
-        #print(rays.device)
-        #assert rays.device ==[ model.device for model in self.models]
+        # print(rays.device)
+        # assert rays.device ==[ model.device for model in self.models]
         results = self(rays)
-        log = {'val_loss': self.loss(results, rgbs)}
+
+        log = {'val_loss': self.loss(results, rgbs)}  # use traditional NeRF loss
         typ = 'fine' if 'rgb_fine' in results else 'coarse'
-    
+
         if batch_nb == 0:
             W, H = self.hparams.img_wh
             img = results[f'rgb_{typ}'].view(H, W, 3).cpu()
-            img = img.permute(2, 0, 1) # (3, H, W)
-            img_gt = rgbs.view(H, W, 3).permute(2, 0, 1).cpu() # (3, H, W)
-            depth = visualize_depth(results[f'depth_{typ}'].view(H, W)) # (3, H, W)
-            stack = torch.stack([img_gt, img, depth]) # (3, 3, H, W)
+            img = img.permute(2, 0, 1)  # (3, H, W)
+            img_gt = rgbs.view(H, W, 3).permute(2, 0, 1).cpu()  # (3, H, W)
+            depth = visualize_depth(results[f'depth_{typ}'].view(H, W))  # (3, H, W)
+            stack = torch.stack([img_gt, img, depth])  # (3, 3, H, W)
             self.logger.experiment.add_images('val/GT_pred_depth',
-                                               stack, self.global_step)
+                                              stack, self.global_step)
 
         log['val_psnr'] = psnr(results[f'rgb_{typ}'], rgbs)
         return log
@@ -154,43 +160,248 @@ class NeRFSystem(LightningModule):
                                  'val_psnr': mean_psnr},
                 'log': {'val/loss': mean_loss,
                         'val/psnr': mean_psnr}
-               }
-
-
-
+                }
 
 
 class Enhanced_NeRF_System(NeRFSystem):
     def __init__(self, hparams):
         super(Enhanced_NeRF_System, self).__init__(hparams)
-        pass
+
+        '''
+        for test / valid process
+        using the functions from the parent class
+        just modify the train steps
+        '''
+        self.hparams = hparams
+
+        self.loss = loss_dict[hparams.loss_type]()
+
+        # self.embedding_xyz = Embedding(3, 10) # 10 is the default number
+        # self.embedding_dir = Embedding(3, 4) # 4 is the default number
+        self.embedding_chroma = Embedding(3, 4)  # 4 is the default number
+
+        assert len(self.embeddings) > 0  # should be in the parent calss
+
+        self.embeddings += [self.embedding_chroma]
+
+        self.nerf_coarse = NeRF_Chromatic()
+        self.models = [self.nerf_coarse]
+
+        self.refresh_flag=False
+
+
+        if hparams.N_importance > 0:
+            #self.nerf_fine = NeRF_Chromatic()
+
+            '''
+            set the initial params to be identical to avoid some problem.
+            
+            using certain random seeds(1029), 
+            the coarse model will converge faster and the fine model will converge slower.
+            e.g. coarse PSNR 18db, fine psnr 10db 
+            '''
+            self.nerf_fine=copy.deepcopy(self.nerf_coarse)
+
+            self.models += [self.nerf_fine]
+
+    def decode_batch_train(self, batch):
+
+        rays = batch['rays']  # (B, 8)
+        rgbs = batch['rgbs']  # (B, 3)
+
+        '''
+        define a function for 
+        '''
+
+        rgb2 = batch['rgbs_2']  # (B, 3)
+        chroma = batch['chroma']  # (B, 3)
+
+        return rays, rgbs, rgb2, chroma
 
 
 
 
+    def training_step(self, batch, batch_nb):
+        log = {'lr': get_learning_rate(self.optimizer)}
+
+        if self.refresh_flag:
+            # seems to be not necessary, if the initialized coarse and fine nerf are copied identical.
+            self.refresh_coarse_to_fine()
+
+        rays, rgbs, rgb2, chroma = self.decode_batch_train(batch)
+        results = self(rays, chroma)
+
+        log['train/loss'] = loss = self.loss(results, rgbs, rgb2)
+        typ = 'fine' if 'rgb_fine' in results else 'coarse'
+
+        with torch.no_grad():
+            psnr_ = psnr(results[f'rgb_{typ}'], rgbs)
+            psnr_2 = psnr(results[f'rgb2_{typ}'], rgb2)
+
+            typ = 'coarse'
+            psnr_co = psnr(results[f'rgb_{typ}'], rgbs)
+            psnr_2_co = psnr(results[f'rgb_{typ}'], rgbs)
+
+            log['train/psnr'] = psnr_
+
+        if psnr_co+psnr_2_co > 2+ psnr_+psnr_2:
+            self.refresh_flag=True
+        else:
+            self.refresh_flag=False
+
+        return {'loss': loss,
+                'progress_bar': {'train_psnr ': psnr_,
+                                 'train_coarse ': psnr_co,
+                                 'train_psnr2': psnr_2,
+
+                                 'train_2_coarse': psnr_2_co
+
+                                 },
+                'log': log
+                }
+
+    def refresh_coarse_to_fine(self):
+        self.nerf_fine=copy.deepcopy(self.nerf_coarse)
+        warnings.warn('refresh coarse to fine')
 
 
 
+    def forward(self, rays, chroma=None):
+        """Do batched inference on rays using chunk."""
+        B = rays.shape[0]
+        results = defaultdict(list)
+        for i in range(0, B, self.hparams.chunk):
+
+            '''
+            the pytorch-lightening module tends to call the forward function to perform a evaluation
+            even if the whole precess is for training. 
+            so, manually adding the default embedding is needed.
+            '''
+            if chroma is None:
+                '''
+                Although is not training process.
+                the self.embeddings still have 3 embedding fucntions.
+                
+                so we need to add default embedding,
+                to let the render_rays function to pass.
+                '''
+                default_embedding = torch.zeros(1, 3)
+
+                rendered_ray_chunks = \
+                    render_rays(self.models,
+                                self.embeddings,
+                                rays[i:i + self.hparams.chunk],
+                                self.hparams.N_samples,
+                                self.hparams.use_disp,
+                                self.hparams.perturb,
+                                self.hparams.noise_std,
+                                self.hparams.N_importance,
+                                self.hparams.chunk,  # chunk size is effective in val mode
+                                self.train_dataset.white_back,
+                                chroma_unembedded_=default_embedding
+                                )
 
 
+            else:
+                rendered_ray_chunks = \
+                    render_rays(self.models,
+                                self.embeddings,
+                                rays[i:i + self.hparams.chunk],
+                                self.hparams.N_samples,
+                                self.hparams.use_disp,
+                                self.hparams.perturb,
+                                self.hparams.noise_std,
+                                self.hparams.N_importance,
+                                self.hparams.chunk,  # chunk size is effective in val mode
+                                self.train_dataset.white_back,
+                                chroma_unembedded_=chroma
+                                )
+
+            for k, v in rendered_ray_chunks.items():
+                results[k] += [v]
+
+        for k, v in results.items():
+            results[k] = torch.cat(v, 0)
+        return results
+
+    def validation_step(self, batch, batch_nb):
+        rays, rgbs = self.decode_batch(batch)
+        rays = rays.squeeze()  # (H*W, 3)
+        rgbs = rgbs.squeeze()  # (H*W, 3)
+        # print(rays.device)
+        # for model in self.models:
+        #    device=rays.device
+        #    model=model.to(device)
+
+        # print(rays.device)
+        # assert rays.device ==[ model.device for model in self.models]
+        results = self(rays)
+
+        loss_func = MSELoss()
+        log = {'val_loss': loss_func(results, rgbs)}  # use traditional MSE loss
+        typ = 'fine' if 'rgb_fine' in results else 'coarse'
+
+        if batch_nb == 0:
+            W, H = self.hparams.img_wh
+            img = results[f'rgb_{typ}'].view(H, W, 3).cpu()
+            img = img.permute(2, 0, 1)  # (3, H, W)
+            img_gt = rgbs.view(H, W, 3).permute(2, 0, 1).cpu()  # (3, H, W)
+            depth = visualize_depth(results[f'depth_{typ}'].view(H, W))  # (3, H, W)
+            stack = torch.stack([img_gt, img, depth])  # (3, 3, H, W)
+            self.logger.experiment.add_images('val/GT_pred_depth',
+                                              stack, self.global_step)
+
+        log['val_psnr'] = psnr(results[f'rgb_{typ}'], rgbs)
+        return log
+
+    def validation_epoch_end(self, outputs):
+        mean_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
+        mean_psnr = torch.stack([x['val_psnr'] for x in outputs]).mean()
+
+        return {'progress_bar': {'val_loss': mean_loss,
+                                 'val_psnr': mean_psnr},
+                'log': {'val/loss': mean_loss,
+                        'val/psnr': mean_psnr}
+                }
 
 
+# https://zhuanlan.zhihu.com/p/103296505
+
+
+def seed_torch(seed=1029):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.enabled = False
 
 
 if __name__ == '__main__':
+    #mannual_seed = 29
+    mannual_seed=1029
+
+    # random seeds seems to influence the convergence point
+    print(f'\nstart,seed={mannual_seed}\n')
+
+    seed_torch(mannual_seed)
 
     print(datetime.datetime.now())
     print(f'cuda available:{torch.cuda.is_available()}')
-    #os.environ["CUDA_VISIBLE_DEVICES"]="1"
-
+    # os.environ["CUDA_VISIBLE_DEVICES"]="1"
 
     hparams = get_opts()
-    system = NeRFSystem(hparams)
+
+    print(f'params{hparams}')
+    system = Enhanced_NeRF_System(hparams)
     checkpoint_callback = ModelCheckpoint(filepath=os.path.join(f'ckpts/{hparams.exp_name}',
                                                                 '{epoch:d}'),
                                           monitor='val/loss',
                                           mode='min',
-                                          save_top_k=5,)
+                                          save_top_k=5, )
 
     logger = TestTubeLogger(
         save_dir="logs",
@@ -206,11 +417,11 @@ if __name__ == '__main__':
                       early_stop_callback=None,
                       weights_summary=None,
                       progress_bar_refresh_rate=1,
-                      gpus=hparams.num_gpus,
-                      #gpus=2,
-                      distributed_backend='ddp' if hparams.num_gpus>1 else None,
+                      gpus=hparams.num_gpus if not DEBUG else 1,
+                      # gpus=1,
+                      distributed_backend='ddp' if hparams.num_gpus > 1 else None,
                       num_sanity_val_steps=1,
                       benchmark=True,
-                      profiler=hparams.num_gpus==1)
+                      profiler=hparams.num_gpus == 1)
 
     trainer.fit(system)
