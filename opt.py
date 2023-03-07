@@ -30,6 +30,7 @@ def get_opts():
                         help='loss to use')
     parser.add_argument('--chroma_std',type=str,default="0.1,0.1,0.1",help='std dev of chromatic transformation')
 
+    parser.add_argument('--low_datanum',default=True,help='use part of the training data.')
 
     parser.add_argument('--batch_size', type=int, default=1024,
                         help='batch size')

@@ -99,7 +99,7 @@ class NeRFSystem(LightningModule):
     def train_dataloader(self):
         return DataLoader(self.train_dataset,
                           shuffle=True,
-                          num_workers=1 if DEBUG else 4,
+                          num_workers=1 if DEBUG else 8,
                           batch_size=self.hparams.batch_size,
                           pin_memory=True)
 
@@ -270,7 +270,8 @@ class Enhanced_NeRF_System(NeRFSystem):
         kwargs = {'root_dir': self.hparams.root_dir,
                   'img_wh': tuple(self.hparams.img_wh),
                   'chromatic':True,
-                  'chromatic_std':self.chroma_std
+                  'chromatic_std':self.chroma_std,
+                  'low_datanum':self.hparams.low_datanum
                   }
         if self.hparams.dataset_name == 'llff':
             kwargs['spheric_poses'] = self.hparams.spheric_poses

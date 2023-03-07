@@ -2,7 +2,17 @@ import time
 import warnings
 
 import torch
-from torchsearchsorted import searchsorted
+
+
+
+
+if torch.__version__=='1.4.0':
+    old_torch=True
+    from torchsearchsorted import searchsorted
+else:
+    print(f'rendering.py: torch version ={torch.__version__}')
+    searchsorted=torch.searchsorted
+    old_torch=False
 
 __all__ = ['render_rays']
 
@@ -43,7 +53,12 @@ def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
         u = torch.rand(N_rays, N_importance, device=bins.device)
     u = u.contiguous()
 
-    inds = searchsorted(cdf, u, side='right')
+
+    if old_torch:
+        inds = searchsorted(cdf, u, side='right')
+    else:
+        inds = searchsorted(cdf, u, right=True)
+
     below = torch.clamp_min(inds - 1, 0)
     above = torch.clamp_max(inds, N_samples_)
 

@@ -22,7 +22,7 @@ DEBUG=True
 
 
 class BlenderDataset(Dataset):
-    def __init__(self, root_dir, split='train', img_wh=(800, 800),chromatic=True,chromatic_std=np.zeros(3)):
+    def __init__(self, root_dir, split='train', img_wh=(800, 800),chromatic=True,chromatic_std=np.zeros(3),low_datanum=True):
         self.root_dir = root_dir
         self.split = split
         assert img_wh[0] == img_wh[1], 'image width must equal image height!'
@@ -33,15 +33,25 @@ class BlenderDataset(Dataset):
         assert isinstance(chromatic_std,np.ndarray)
         self.chromatic_std=chromatic_std
 
+
+        self.low_datanum=low_datanum
+
         self.read_meta()
         self.white_back = True
-
-        print(f'blender dataset initialized! split={split}')
+        print(f'blender dataset initialized! split={split}, low datanum={self.low_datanum}')
         print(f'chromatic std={chromatic_std}')
 
     def read_meta(self):
+
+        if self.low_datanum and self.split=='train':
+            name_=f"transforms_{self.split}.json"
+        else:
+            name_=f"transforms_{self.split}_choice.json"
+
+        print(f'datasets: reading meta at {name_}')
+
         with open(os.path.join(self.root_dir,
-                               f"transforms_{self.split}.json"), 'r') as f:
+                               name_), 'r') as f:
             self.meta = json.load(f)
 
         w, h = self.img_wh
