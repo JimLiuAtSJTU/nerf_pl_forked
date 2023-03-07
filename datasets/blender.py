@@ -1,3 +1,5 @@
+import warnings
+
 import torch
 import torchvision.transforms
 from torch.utils.data import Dataset
@@ -44,9 +46,10 @@ class BlenderDataset(Dataset):
     def read_meta(self):
 
         if self.low_datanum and self.split=='train':
-            name_=f"transforms_{self.split}.json"
-        else:
             name_=f"transforms_{self.split}_choice.json"
+            warnings.warn('using Low data num, part of the training set = 20 imgs')
+        else:
+            name_=f"transforms_{self.split}.json"
 
         print(f'datasets: reading meta at {name_}')
 

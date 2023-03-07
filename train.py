@@ -28,7 +28,12 @@ from metrics import *
 # pytorch-lightning
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning import LightningModule, Trainer
-from pytorch_lightning.logging import TestTubeLogger
+
+import pytorch_lightning
+
+# compatible for more versions
+from pytorch_lightning.loggers import TestTubeLogger
+
 
 DEBUG = False
 
