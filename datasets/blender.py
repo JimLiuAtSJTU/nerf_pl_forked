@@ -22,7 +22,7 @@ DEBUG=True
 
 
 class BlenderDataset(Dataset):
-    def __init__(self, root_dir, split='train', img_wh=(800, 800),chromatic=True):
+    def __init__(self, root_dir, split='train', img_wh=(800, 800),chromatic=True,chromatic_std=np.zeros(3)):
         self.root_dir = root_dir
         self.split = split
         assert img_wh[0] == img_wh[1], 'image width must equal image height!'
@@ -30,11 +30,14 @@ class BlenderDataset(Dataset):
         self.define_transforms()
         self.chromatic=chromatic
 
+        assert isinstance(chromatic_std,np.ndarray)
+        self.chromatic_std=chromatic_std
+
         self.read_meta()
         self.white_back = True
 
-
-
+        print(f'blender dataset initialized! split={split}')
+        print(f'chromatic std={chromatic_std}')
 
     def read_meta(self):
         with open(os.path.join(self.root_dir,
@@ -66,11 +69,11 @@ class BlenderDataset(Dataset):
             self.chroma_codes=[]
             if self.chromatic:
                 image_set_size=len(self.meta['frames'])
-                self.Hue_offsets=np.random.normal( 0,0,image_set_size) # 0.1
+                self.Hue_offsets=np.random.normal( 0,self.chromatic_std[0],image_set_size) # 0.1
                 #self.Hue_offsets=np.random.uniform(-0.5,0.5,image_set_size)
 
-                self.Satuation_offsets=np.random.normal(0,0,image_set_size) # 0.01
-                self.Value_offsets=np.random.normal(0,0,image_set_size) # 0.01
+                self.Satuation_offsets=np.random.normal(0,self.chromatic_std[1],image_set_size) # 0.01
+                self.Value_offsets=np.random.normal(0,self.chromatic_std[2],image_set_size) # 0.01
 
 
             for i,frame in enumerate(self.meta['frames']):
@@ -161,7 +164,6 @@ class BlenderDataset(Dataset):
             assert self.all_rays.shape[0]==self.all_rgbs.shape[0]
             assert self.all_rgbs.shape[0]==self.all_rgbs_2.shape[0]
             assert self.chroma_codes.shape[0]==self.all_rgbs.shape[0]
-            print(f'blender dataset initialized')
     def define_transforms(self):
         self.transform = T.ToTensor()
 

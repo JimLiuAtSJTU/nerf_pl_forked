@@ -28,6 +28,8 @@ def get_opts():
     parser.add_argument('--loss_type', type=str, default='enhanced',
                         choices=['mse','enhanced'],
                         help='loss to use')
+    parser.add_argument('--chroma_std',type=str,default="0.1,0.1,0.1",help='std dev of chromatic transformation')
+
 
     parser.add_argument('--batch_size', type=int, default=1024,
                         help='batch size')
@@ -74,5 +76,6 @@ def get_opts():
 
     parser.add_argument('--exp_name', type=str, default='exp',
                         help='experiment name')
+
 
     return parser.parse_args()

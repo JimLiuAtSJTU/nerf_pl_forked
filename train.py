@@ -3,6 +3,8 @@ import datetime
 import os, sys
 import warnings
 
+import numpy as np
+
 from opt import get_opts
 import torch
 from collections import defaultdict
@@ -80,7 +82,8 @@ class NeRFSystem(LightningModule):
     def prepare_data(self):
         dataset = dataset_dict[self.hparams.dataset_name]
         kwargs = {'root_dir': self.hparams.root_dir,
-                  'img_wh': tuple(self.hparams.img_wh)}
+                  'img_wh': tuple(self.hparams.img_wh)
+                  }
         if self.hparams.dataset_name == 'llff':
             kwargs['spheric_poses'] = self.hparams.spheric_poses
             kwargs['val_num'] = self.hparams.num_gpus
@@ -189,6 +192,8 @@ class Enhanced_NeRF_System(NeRFSystem):
 
         self.refresh_flag=False
 
+        assert isinstance(hparams.chroma_std,str)
+        self.chroma_std=np.array(hparams.chroma_std.split(',')).astype(float)
 
         if hparams.N_importance > 0:
             #self.nerf_fine = NeRF_Chromatic()
@@ -242,7 +247,10 @@ class Enhanced_NeRF_System(NeRFSystem):
             psnr_co = psnr(results[f'rgb_{typ}'], rgbs)
             psnr_2_co = psnr(results[f'rgb_{typ}'], rgbs)
 
-            log['train/psnr'] = psnr_
+            log['train/psnr0'] = psnr_
+            log['train/psnr1'] = psnr_2
+            log['train/psnr0_co'] = psnr_co
+            log['train/psnr1_co'] = psnr_2_co
 
         if psnr_co+psnr_2_co > 2+ psnr_+psnr_2:
             self.refresh_flag=True
@@ -253,12 +261,30 @@ class Enhanced_NeRF_System(NeRFSystem):
                 'progress_bar': {'train_psnr ': psnr_,
                                  'train_coarse ': psnr_co,
                                  'train_psnr2': psnr_2,
-
                                  'train_2_coarse': psnr_2_co
-
                                  },
                 'log': log
                 }
+    def prepare_data(self):
+        dataset = dataset_dict[self.hparams.dataset_name]
+        kwargs = {'root_dir': self.hparams.root_dir,
+                  'img_wh': tuple(self.hparams.img_wh),
+                  'chromatic':True,
+                  'chromatic_std':self.chroma_std
+                  }
+        if self.hparams.dataset_name == 'llff':
+            kwargs['spheric_poses'] = self.hparams.spheric_poses
+            kwargs['val_num'] = self.hparams.num_gpus
+        self.train_dataset = dataset(split='train', **kwargs)
+
+        kwargs = {'root_dir': self.hparams.root_dir,
+                  'img_wh': tuple(self.hparams.img_wh),
+                  'chromatic':True,
+                  'chromatic_std':np.zeros(3)
+                  }
+
+
+        self.val_dataset = dataset(split='val', **kwargs)
 
     def refresh_coarse_to_fine(self):
         self.nerf_fine=copy.deepcopy(self.nerf_coarse)
@@ -380,24 +406,85 @@ def seed_torch(seed=1029):
     torch.backends.cudnn.enabled = False
 
 
+
+import re
+
+def dir_to_indx(dir_str):
+    pattern=re.compile(r'\d+')
+    indx=pattern.search(dir_str)
+    indx_start_in_str=indx.start()
+    assert isinstance(indx_start_in_str,int)
+
+    prefix=dir_str[:indx_start_in_str]
+
+    indx_int=int(indx.group())
+
+    return indx_int,prefix
+
+def create_ckpt_dir(expname):
+    path0='./logs/'
+    path=os.path.join(path0,expname)
+    subdirs=os.listdir(path)
+
+    indices=[]
+    if len(subdirs)==0:
+        max_indx=0
+        prefix='version_'
+    else:
+
+        for dir in subdirs:
+            indx,prefix=dir_to_indx(dir)
+            indices+=[indx]
+
+
+
+        max_indx=max(indices)
+
+    print(f'gathering log path dirs. max={max_indx}')
+
+
+    new_indx=max_indx+1
+
+    new_dir=prefix + f'{new_indx}'
+
+
+    ckpt_path='./ckpts'
+    ckpt_path=os.path.join(ckpt_path,expname)
+
+    full_path=os.path.join(ckpt_path,new_dir)
+
+    if not os.path.exists(full_path):
+        os.makedirs(name=full_path,exist_ok=False)
+        print(f'ckpt dir {full_path} is created! ckpts this time should be saved there.')
+    else:
+        warnings.warn(f'ckpt dir{full_path} already exists! check it out to avoid some problems.')
+
+    return new_dir
+
+
+
+
+
 if __name__ == '__main__':
     #mannual_seed = 29
     mannual_seed=1029
-
     # random seeds seems to influence the convergence point
-    print(f'\nstart,seed={mannual_seed}\n')
 
     seed_torch(mannual_seed)
 
-    print(datetime.datetime.now())
     print(f'cuda available:{torch.cuda.is_available()}')
     # os.environ["CUDA_VISIBLE_DEVICES"]="1"
 
     hparams = get_opts()
+    print(datetime.datetime.now())
+    print(f'exp name:{hparams.exp_name}')
+    print(f'params=\n{hparams}')
+    print(f'\nstart,seed={mannual_seed}\n')
 
-    print(f'params{hparams}')
+    new_ckpoint_dir=create_ckpt_dir(hparams.exp_name)
+
     system = Enhanced_NeRF_System(hparams)
-    checkpoint_callback = ModelCheckpoint(filepath=os.path.join(f'ckpts/{hparams.exp_name}',
+    checkpoint_callback = ModelCheckpoint(filepath=os.path.join(f'ckpts/{hparams.exp_name}', new_ckpoint_dir,
                                                                 '{epoch:d}'),
                                           monitor='val/loss',
                                           mode='min',
@@ -425,3 +512,6 @@ if __name__ == '__main__':
                       profiler=hparams.num_gpus == 1)
 
     trainer.fit(system)
+
+    print(f'{datetime.datetime.now()} exp {hparams.exp_name} finished. details=\n')
+    print(hparams)
