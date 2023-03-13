@@ -7,7 +7,7 @@ def get_opts():
                         default='/home/ubuntu/data/nerf_example_data/nerf_synthetic/lego',
                         help='root directory of dataset')
     parser.add_argument('--dataset_name', type=str, default='blender',
-                        choices=['blender', 'llff'],
+                        choices=['blender', 'llff','llff_chromatic'],
                         help='which dataset to train/val')
     parser.add_argument('--img_wh', nargs="+", type=int, default=[800, 800],
                         help='resolution (img_w, img_h) of the image')
@@ -30,7 +30,7 @@ def get_opts():
                         help='loss to use')
     parser.add_argument('--chroma_std',type=str,default="0.1,0.1,0.1",help='std dev of chromatic transformation')
 
-    parser.add_argument('--low_datanum',default=True,help='use part of the training data.')
+    parser.add_argument('--low_datanum',type=int,default=100,choices=[5,10,20,100,2],help='use part of the training data.')
 
     parser.add_argument('--batch_size', type=int, default=1024,
                         help='batch size')

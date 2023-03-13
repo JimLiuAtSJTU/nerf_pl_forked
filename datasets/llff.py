@@ -5,9 +5,9 @@ import numpy as np
 import os
 from PIL import Image
 from torchvision import transforms as T
-
+import warnings
 from .ray_utils import *
-
+from .img_color_augmentation import color_transformation_single
 
 def normalize(v):
     """Normalize a vector."""
@@ -316,3 +316,269 @@ class LLFFDataset(Dataset):
                 sample['rgbs'] = img
 
         return sample
+
+
+class LLFF_Chromatic_Dataset(Dataset):
+    def __init__(self, root_dir, split='train',
+                 img_wh=(504, 378),
+                 spheric_poses=False,
+                 val_num=1,
+                 chromatic=True,
+                 chromatic_std=np.zeros(3),
+                 low_datanum=20,
+                 aug_to_original_size=True):
+
+
+
+        """
+        spheric_poses: whether the images are taken in a spheric inward-facing manner
+                       default: False (forward-facing)
+        val_num: number of val images (used for multigpu training, validate same image for all gpus)
+        """
+        self.root_dir = root_dir
+        self.split = split
+        self.img_wh = img_wh
+        self.spheric_poses = spheric_poses
+        self.val_num = max(1, val_num)  # at least 1
+        self.define_transforms()
+
+        self.chromatic=chromatic
+        self.chromatic_std=chromatic_std
+
+        self.aug_to_original_size=aug_to_original_size
+        self.low_datanum=low_datanum
+
+
+
+        self.read_meta()
+        self.white_back = False
+
+    def read_meta(self):
+        poses_bounds = np.load(os.path.join(self.root_dir,
+                                            'poses_bounds.npy'))  # (N_images, 17)
+        N_images=poses_bounds.shape[0]
+
+        indices_=np.arange(N_images)
+
+        desired_length=self.low_datanum
+
+        assert desired_length<=N_images
+        self.k_times=N_images//desired_length
+
+
+        chosen_indices=np.random.choice(indices_,(desired_length),replace=False)
+        chosen_indices.sort()
+        chosen_indices=list(chosen_indices)
+
+
+        self.image_paths = sorted(glob.glob(os.path.join(self.root_dir, 'images/*')))
+        # load full resolution image then resize
+        if self.split in ['train', 'val']:
+            assert len(poses_bounds) == len(self.image_paths), \
+                'Mismatch between number of images and number of poses! Please rerun COLMAP!'
+
+        if self.split=='train':
+
+            if self.low_datanum<100:
+                poses_bounds=poses_bounds[chosen_indices,:]
+
+                image_paths=np.array(self.image_paths).astype('<U2048') # conver to numpy array to select by using multiple indices
+                self.image_paths=list(image_paths[chosen_indices])
+                warnings.warn(f'using Low data num, part of the training set = {self.low_datanum} imgs')
+            else:
+
+                warnings.warn(f'using full data num, original length={N_images} imgs')
+
+
+        poses = poses_bounds[:, :15].reshape(-1, 3, 5)  # (N_images, 3, 5)
+        self.bounds = poses_bounds[:, -2:]  # (N_images, 2)
+
+        # Step 1: rescale focal length according to training resolution
+        H, W, self.focal = poses[0, :, -1]  # original intrinsics, same for all images
+        assert H * self.img_wh[0] == W * self.img_wh[1], \
+            f'You must set @img_wh to have the same aspect ratio as ({W}, {H}) !'
+
+        self.focal *= self.img_wh[0] / W
+
+        # Step 2: correct poses
+        # Original poses has rotation in form "down right back", change to "right up back"
+        # See https://github.com/bmild/nerf/issues/34
+        poses = np.concatenate([poses[..., 1:2], -poses[..., :1], poses[..., 2:4]], -1)
+        # (N_images, 3, 4) exclude H, W, focal
+        self.poses, self.pose_avg = center_poses(poses)
+        distances_from_center = np.linalg.norm(self.poses[..., 3], axis=1)
+        val_idx = np.argmin(distances_from_center)  # choose val image as the closest to
+        # center image
+
+        # Step 3: correct scale so that the nearest depth is at a little more than 1.0
+        # See https://github.com/bmild/nerf/issues/34
+        near_original = self.bounds.min()
+        scale_factor = near_original * 0.75  # 0.75 is the default parameter
+        # the nearest depth is at 1/0.75=1.33
+        self.bounds /= scale_factor
+        self.poses[..., 3] /= scale_factor
+
+        # ray directions for all pixels, same for all images (same H, W, focal)
+        self.directions = \
+            get_ray_directions(self.img_wh[1], self.img_wh[0], self.focal)  # (H, W, 3)
+
+        if self.split == 'train':  # create buffer of all rays and rgb data
+            # use first N_images-1 to train, the LAST is val
+            self.all_rays = []
+            self.all_rgbs = []
+
+
+            self.all_rgbs_2=[]
+            self.chroma_codes=[]
+
+            k_times = self.k_times
+
+
+            self.Hue_offsets = np.random.normal(0, self.chromatic_std[0], (desired_length, k_times))  # 0.1
+            # self.Hue_offsets=np.random.uniform(-0.5,0.5,image_set_size)
+
+            self.Satuation_offsets = np.random.normal(0, self.chromatic_std[1], (desired_length, k_times))  # 0.01
+            self.Value_offsets = np.random.normal(0, self.chromatic_std[2], (desired_length, k_times))  # 0.01
+
+            for i, image_path in enumerate(self.image_paths):
+                if i == val_idx:  # exclude the val image
+                    continue
+                c2w = torch.FloatTensor(self.poses[i])
+
+                img = Image.open(image_path).convert('RGB')
+
+                for j in range(self.k_times):
+
+
+                    assert img.size[1] * self.img_wh[0] == img.size[0] * self.img_wh[1], \
+                        f'''{image_path} has different aspect ratio than img_wh, 
+                            please check your data!'''
+                    img0_RGB = img.resize(self.img_wh, Image.LANCZOS)
+
+                    img_tensor = self.transform(img0_RGB)  # (3, h, w)
+                    img_view = img_tensor.view(3, -1).permute(1, 0)  # (h*w, 3) RGB
+                    self.all_rgbs += [img_view]
+
+
+
+                    rays_o, rays_d = get_rays(self.directions, c2w)  # both (h*w, 3)
+                    if not self.spheric_poses:
+                        near, far = 0, 1
+                        rays_o, rays_d = get_ndc_rays(self.img_wh[1], self.img_wh[0],
+                                                      self.focal, 1.0, rays_o, rays_d)
+                        # near plane is always at 1.0
+                        # near and far in NDC are always 0 and 1
+                        # See https://github.com/bmild/nerf/issues/34
+                    else:
+                        near = self.bounds.min()
+                        far = min(8 * near, self.bounds.max())  # focus on central object only
+
+                    dh = self.Hue_offsets[i, j]
+                    ds = self.Satuation_offsets[i, j]
+                    dv = self.Value_offsets[i, j]
+
+                    imgRGB_nparray = np.asarray(img0_RGB)
+
+                    chromatic_img_array = color_transformation_single(imgRGB_nparray,
+                                                                      Hue_offset=dh,
+                                                                      gamma_S=ds,
+                                                                      gamma_V=dv)
+                    chromatic_img = Image.fromarray(chromatic_img_array)
+                    # chromatic_img.show()
+                    chromatic_img = self.transform(chromatic_img)  # 3, H, W tensor
+
+                    chromatic_img_flatten=chromatic_img.view(3,-1).permute(1,0) # (h*w, 3), ok
+
+                    self.all_rgbs_2 +=[chromatic_img_flatten]
+
+                    self.chroma_codes_tiny =torch.tensor([dh,ds,dv])
+                    self.chroma_codes_tiny=self.chroma_codes_tiny.unsqueeze(0)
+
+                    self.chroma_codes +=[self.chroma_codes_tiny.repeat(img_view.shape[0],1)]
+
+
+
+
+                    self.all_rays += [torch.cat([rays_o, rays_d,
+                                                 near * torch.ones_like(rays_o[:, :1]),
+                                                 far * torch.ones_like(rays_o[:, :1])],
+                                                1)]  # (h*w, 8)
+
+            self.all_rays = torch.cat(self.all_rays, 0)  # ((N_images-1)*h*w, 8)
+            self.all_rgbs = torch.cat(self.all_rgbs, 0)  # ((N_images-1)*h*w, 3)
+            self.all_rgbs_2 = torch.cat(self.all_rgbs_2, 0) # (len(self.meta['frames])*h*w, 3)
+            self.chroma_codes = torch.cat(self.chroma_codes, 0) # (len(self.meta['frames])*h*w, 3)
+
+            assert self.all_rays.shape[0]==self.all_rgbs.shape[0]
+            assert self.all_rgbs.shape[0]==self.all_rgbs_2.shape[0]
+            assert self.chroma_codes.shape[0]==self.all_rgbs.shape[0]
+
+        elif self.split == 'val':
+            print('val image is', self.image_paths[val_idx])
+            self.c2w_val = self.poses[val_idx]
+            self.image_path_val = self.image_paths[val_idx]
+
+        else:  # for testing, create a parametric rendering path
+            if self.split.endswith('train'):  # test on training set
+                self.poses_test = self.poses
+            elif not self.spheric_poses:
+                focus_depth = 3.5  # hardcoded, this is numerically close to the formula
+                # given in the original repo. Mathematically if near=1
+                # and far=infinity, then this number will converge to 4
+                radii = np.percentile(np.abs(self.poses[..., 3]), 90, axis=0)
+                self.poses_test = create_spiral_poses(radii, focus_depth)
+            else:
+                radius = 1.1 * self.bounds.min()
+                self.poses_test = create_spheric_poses(radius)
+
+    def define_transforms(self):
+        self.transform = T.ToTensor()
+
+    def __len__(self):
+        if self.split == 'train':
+            return len(self.all_rays)
+        if self.split == 'val':
+            return self.val_num
+        return len(self.poses_test)
+
+    def __getitem__(self, idx):
+        if self.split == 'train':  # use data in the buffers
+            sample = {'rays': self.all_rays[idx],
+                      'rgbs': self.all_rgbs[idx],
+                      'rgbs_2': self.all_rgbs_2[idx],
+                      'chroma': self.chroma_codes[idx]
+
+                      }
+
+        else:
+            if self.split == 'val':
+                c2w = torch.FloatTensor(self.c2w_val)
+            else:
+                c2w = torch.FloatTensor(self.poses_test[idx])
+
+            rays_o, rays_d = get_rays(self.directions, c2w)
+            if not self.spheric_poses:
+                near, far = 0, 1
+                rays_o, rays_d = get_ndc_rays(self.img_wh[1], self.img_wh[0],
+                                              self.focal, 1.0, rays_o, rays_d)
+            else:
+                near = self.bounds.min()
+                far = min(8 * near, self.bounds.max())
+
+            rays = torch.cat([rays_o, rays_d,
+                              near * torch.ones_like(rays_o[:, :1]),
+                              far * torch.ones_like(rays_o[:, :1])],
+                             1)  # (h*w, 8)
+
+            sample = {'rays': rays,
+                      'c2w': c2w}
+
+            if self.split == 'val':
+                img = Image.open(self.image_path_val).convert('RGB')
+                img = img.resize(self.img_wh, Image.LANCZOS)
+                img = self.transform(img)  # (3, h, w)
+                img = img.view(3, -1).permute(1, 0)  # (h*w, 3)
+                sample['rgbs'] = img
+
+        return sample
+

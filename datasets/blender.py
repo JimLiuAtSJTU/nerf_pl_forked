@@ -19,35 +19,45 @@ DEBUG=True
 
 
 
+original_size=100
 
 
 
 
 class BlenderDataset(Dataset):
-    def __init__(self, root_dir, split='train', img_wh=(800, 800),chromatic=True,chromatic_std=np.zeros(3),low_datanum=True):
+    def __init__(self, root_dir, split='train', img_wh=(800, 800),chromatic=True,chromatic_std=np.zeros(3),low_datanum=20,aug_to_original_size=True):
         self.root_dir = root_dir
         self.split = split
         assert img_wh[0] == img_wh[1], 'image width must equal image height!'
         self.img_wh = img_wh
         self.define_transforms()
         self.chromatic=chromatic
+        self.aug_to_original_size=aug_to_original_size
 
         assert isinstance(chromatic_std,np.ndarray)
         self.chromatic_std=chromatic_std
 
+        assert low_datanum in [2,5,10,20,100]
 
         self.low_datanum=low_datanum
 
         self.read_meta()
         self.white_back = True
-        print(f'blender dataset initialized! split={split}, low datanum={self.low_datanum}')
+        print(f'blender dataset initialized! split={split}, low datanum config={self.low_datanum}')
         print(f'chromatic std={chromatic_std}')
 
     def read_meta(self):
 
-        if self.low_datanum and self.split=='train':
-            name_=f"transforms_{self.split}_choice.json"
-            warnings.warn('using Low data num, part of the training set = 20 imgs')
+        if self.split=='train':
+
+            if self.low_datanum<100:
+                key_=(self.low_datanum)
+                name_=f"transforms_{self.split}_choice_{self.low_datanum}.json"
+                warnings.warn(f'using Low data num, part of the training set = {key_} imgs')
+            else:
+                name_=f"transforms_{self.split}.json"
+                warnings.warn(f'using full data num, 100 imgs')
+
         else:
             name_=f"transforms_{self.split}.json"
 
@@ -82,92 +92,111 @@ class BlenderDataset(Dataset):
             self.chroma_codes=[]
             if self.chromatic:
                 image_set_size=len(self.meta['frames'])
-                self.Hue_offsets=np.random.normal( 0,self.chromatic_std[0],image_set_size) # 0.1
-                #self.Hue_offsets=np.random.uniform(-0.5,0.5,image_set_size)
 
-                self.Satuation_offsets=np.random.normal(0,self.chromatic_std[1],image_set_size) # 0.01
-                self.Value_offsets=np.random.normal(0,self.chromatic_std[2],image_set_size) # 0.01
+                if self.aug_to_original_size:
+                    # k * img_set_size = original size
+                    # k * 20 = 100
+
+                    self.k_times = original_size // image_set_size
+
+
+
+
+                    k_times=self.k_times
+
+                    assert original_size % image_set_size == 0
+
+                    self.Hue_offsets=np.random.normal( 0,self.chromatic_std[0],(image_set_size,k_times)) # 0.1
+                    #self.Hue_offsets=np.random.uniform(-0.5,0.5,image_set_size)
+
+                    self.Satuation_offsets=np.random.normal(0,self.chromatic_std[1],(image_set_size,k_times)) # 0.01
+                    self.Value_offsets=np.random.normal(0,self.chromatic_std[2],(image_set_size,k_times)) # 0.01
+
 
 
             for i,frame in enumerate(self.meta['frames']):
                 pose = np.array(frame['transform_matrix'])[:3, :4]
-                self.poses += [pose]
-                c2w = torch.FloatTensor(pose)
-
-                image_path = os.path.join(self.root_dir, f"{frame['file_path']}.png")
-                self.image_paths += [image_path]
-                img_raw = Image.open(image_path) # PIL object
-                img = img_raw.resize(self.img_wh, Image.LANCZOS) # PIL object
 
 
+                for j in range(self.k_times):
 
+                    self.poses += [pose]
+                    c2w = torch.FloatTensor(pose)
 
-
-                img_tensor=self.transform(img)
-
-                img_tensor_RGB = img_tensor[:3,:,:]*img_tensor[-1:,:, :]  + (1-img_tensor[-1:,:,:]) #  3 , h, w Tensor
-
-                trans=torchvision.transforms.ToPILImage()
-                img_RGB =trans(img_tensor_RGB)
-                #img_RGB.show()
-
-                img_view = img_tensor_RGB.view(3, -1).permute(1, 0) # (h*w, 4) RGBA
-                #[https://blog.csdn.net/qq_19707521/article/details/78367617](https://blog.csdn.net/qq_19707521/article/details/78367617)
+                    image_path = os.path.join(self.root_dir, f"{frame['file_path']}.png")
+                    self.image_paths += [image_path]
+                    img_raw = Image.open(image_path) # PIL object
+                    img = img_raw.resize(self.img_wh, Image.LANCZOS) # PIL object
 
 
 
 
-                '''
-                
-                # change the dimension
-                img_tensor_rgb = img.permute((1,2,0)) # h, w ,4 Tensor
-                #img_tensor_shape=img_tensor.shape
-                #blend A to RGB
 
-                #img_flatten=img.view(4,-1).permute(1,0)
-                img_tensor_ = img[:3,:,:]*img[-1:,:, :]  + (1-img[-1:,:,:]) #  3 , h, w Tensor
+                    img_tensor=self.transform(img)
 
-                img_view=img_tensor_.view(3,-1).permute(1, 0) # (h*w, 3) RGBA
+                    img_tensor_RGB = img_tensor[:3,:,:]*img_tensor[-1:,:, :]  + (1-img_tensor[-1:,:,:]) #  3 , h, w Tensor
 
+                    trans=torchvision.transforms.ToPILImage()
+                    img_RGB =trans(img_tensor_RGB)
+                    #img_RGB.show()
 
-                img_numpy=img_tensor_rgb.permute().numpy().astype('uint8')
-                '''
-
-                dh=self.Hue_offsets[i]
-                ds=self.Satuation_offsets[i]
-                dv=self.Value_offsets[i]
-
-
-                imgRGB_nparray=np.asarray(img_RGB)
-
-                chromatic_img_array=color_transformation_single(imgRGB_nparray,
-                                                          Hue_offset=dh,
-                                                          gamma_S=ds,
-                                                          gamma_V=dv)
-                chromatic_img=Image.fromarray(chromatic_img_array)
-                #chromatic_img.show()
-                chromatic_img=self.transform(chromatic_img) # 3, H, W tensor
-
-
-                chromatic_img_flatten=chromatic_img.view(3,-1).permute(1,0) # (h*w, 3), ok
-                self.all_rgbs += [img_view]
-                self.all_rgbs_2 +=[chromatic_img_flatten]
+                    img_view = img_tensor_RGB.view(3, -1).permute(1, 0) # (h*w, 4) RGBA
+                    #[https://blog.csdn.net/qq_19707521/article/details/78367617](https://blog.csdn.net/qq_19707521/article/details/78367617)
 
 
 
-                self.chroma_codes_tiny =torch.tensor([dh,ds,dv])
-                self.chroma_codes_tiny=self.chroma_codes_tiny.unsqueeze(0)
+
+                    '''
+                    
+                    # change the dimension
+                    img_tensor_rgb = img.permute((1,2,0)) # h, w ,4 Tensor
+                    #img_tensor_shape=img_tensor.shape
+                    #blend A to RGB
+    
+                    #img_flatten=img.view(4,-1).permute(1,0)
+                    img_tensor_ = img[:3,:,:]*img[-1:,:, :]  + (1-img[-1:,:,:]) #  3 , h, w Tensor
+    
+                    img_view=img_tensor_.view(3,-1).permute(1, 0) # (h*w, 3) RGBA
+    
+    
+                    img_numpy=img_tensor_rgb.permute().numpy().astype('uint8')
+                    '''
+
+                    dh=self.Hue_offsets[i,j]
+                    ds=self.Satuation_offsets[i,j]
+                    dv=self.Value_offsets[i,j]
 
 
-                self.chroma_codes +=[self.chroma_codes_tiny.repeat(img_view.shape[0],1)]
+                    imgRGB_nparray=np.asarray(img_RGB)
+
+                    chromatic_img_array=color_transformation_single(imgRGB_nparray,
+                                                              Hue_offset=dh,
+                                                              gamma_S=ds,
+                                                              gamma_V=dv)
+                    chromatic_img=Image.fromarray(chromatic_img_array)
+                    #chromatic_img.show()
+                    chromatic_img=self.transform(chromatic_img) # 3, H, W tensor
 
 
-                rays_o, rays_d = get_rays(self.directions, c2w) # both (h*w, 3)
+                    chromatic_img_flatten=chromatic_img.view(3,-1).permute(1,0) # (h*w, 3), ok
+                    self.all_rgbs += [img_view]
+                    self.all_rgbs_2 +=[chromatic_img_flatten]
 
-                self.all_rays += [torch.cat([rays_o, rays_d, 
-                                             self.near*torch.ones_like(rays_o[:, :1]),
-                                             self.far*torch.ones_like(rays_o[:, :1])],
-                                             1)] # (h*w, 8)
+
+
+                    self.chroma_codes_tiny =torch.tensor([dh,ds,dv])
+                    self.chroma_codes_tiny=self.chroma_codes_tiny.unsqueeze(0)
+
+
+                    self.chroma_codes +=[self.chroma_codes_tiny.repeat(img_view.shape[0],1)]
+
+
+                    rays_o, rays_d = get_rays(self.directions, c2w) # both (h*w, 3)
+
+                    self.all_rays += [torch.cat([rays_o, rays_d,
+                                                 self.near*torch.ones_like(rays_o[:, :1]),
+                                                 self.far*torch.ones_like(rays_o[:, :1])],
+                                                 1)] # (h*w, 8)
 
             self.all_rays = torch.cat(self.all_rays, 0) # (len(self.meta['frames])*h*w, 3)
             self.all_rgbs = torch.cat(self.all_rgbs, 0) # (len(self.meta['frames])*h*w, 3)

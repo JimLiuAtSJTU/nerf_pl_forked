@@ -16,7 +16,7 @@ class MSELoss(nn.Module):
 
 
 class MSE_Enhanced_Loss(nn.Module):
-    def __init__(self, lambda_=1):
+    def __init__(self, lambda_=0.2):
         super(MSE_Enhanced_Loss, self).__init__()
         self.loss = nn.MSELoss(reduction='mean')
 
@@ -29,7 +29,7 @@ class MSE_Enhanced_Loss(nn.Module):
         if 'rgb_fine' in inputs:
             loss += self.loss(inputs['rgb_fine'], targets_RGB_img)
             loss += self.loss(inputs['rgb2_fine'], targets_Chroma_img) * self.lam_
-        return loss
+        return loss/(1+self.lam_)
 
 
 loss_dict = {'mse': MSELoss,

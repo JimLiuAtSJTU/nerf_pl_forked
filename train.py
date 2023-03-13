@@ -3,7 +3,7 @@ import datetime
 import os, sys
 import warnings
 
-import numpy as np
+#import numpy as np
 
 from opt import get_opts
 import torch
@@ -36,6 +36,51 @@ from pytorch_lightning.loggers import TestTubeLogger
 
 
 DEBUG = False
+
+
+
+
+def get_optimizer_fancy(hparams, models):
+    eps = 1e-8
+    parameters = []
+
+    param_group=[]
+
+    for model in models:
+        parameters += list(model.parameters())
+
+        #low_lr_domain=['dir_encoding','rgb_residial_block','rgb_residial_block2','rgb'  ]
+        low_lr_domain=[model.dir_encoding.parameters(),model.rgb.parameters(),
+                       model.rgb_residial_block.parameters(),
+                       model.rgb_residial_block2.parameters(),]
+
+        for item in low_lr_domain:
+
+            param_group += [
+                {'params': item,
+                 'weight_decay':hparams.weight_decay,
+                 'lr': hparams.lr
+                 },
+            ]
+
+
+
+    if hparams.optimizer == 'sgd':
+        optimizer = SGD(param_group, lr=hparams.lr,
+                        momentum=hparams.momentum, weight_decay=hparams.weight_decay)
+    elif hparams.optimizer == 'adam':
+        optimizer = Adam(param_group, lr=hparams.lr, eps=eps,
+                         weight_decay=hparams.weight_decay)
+    elif hparams.optimizer == 'radam':
+        optimizer = RAdam(param_group, lr=hparams.lr, eps=eps,
+                          weight_decay=hparams.weight_decay)
+    elif hparams.optimizer == 'ranger':
+        optimizer = Ranger(param_group, lr=hparams.lr, eps=eps,
+                          weight_decay=hparams.weight_decay)
+    else:
+        raise ValueError('optimizer not recognized!')
+
+    return optimizer
 
 
 class NeRFSystem(LightningModule):
@@ -250,7 +295,7 @@ class Enhanced_NeRF_System(NeRFSystem):
 
             typ = 'coarse'
             psnr_co = psnr(results[f'rgb_{typ}'], rgbs)
-            psnr_2_co = psnr(results[f'rgb_{typ}'], rgbs)
+            psnr_2_co = psnr(results[f'rgb2_{typ}'], rgb2)
 
             log['train/psnr0'] = psnr_
             log['train/psnr1'] = psnr_2
@@ -261,6 +306,8 @@ class Enhanced_NeRF_System(NeRFSystem):
             self.refresh_flag=True
         else:
             self.refresh_flag=False
+
+
 
         return {'loss': loss,
                 'progress_bar': {'train_psnr ': psnr_,
@@ -430,6 +477,8 @@ def dir_to_indx(dir_str):
 def create_ckpt_dir(expname):
     path0='./logs/'
     path=os.path.join(path0,expname)
+    os.makedirs(path,exist_ok=True)
+
     subdirs=os.listdir(path)
 
     indices=[]
@@ -473,10 +522,13 @@ def create_ckpt_dir(expname):
 
 if __name__ == '__main__':
     #mannual_seed = 29
-    mannual_seed=1029
+    #mannual_seed=1029
+    mannual_seed = 2
     # random seeds seems to influence the convergence point
 
     seed_torch(mannual_seed)
+
+    print(f'lightning version:{pytorch_lightning.__version__}')
 
     print(f'cuda available:{torch.cuda.is_available()}')
     # os.environ["CUDA_VISIBLE_DEVICES"]="1"
